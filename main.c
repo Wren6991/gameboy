@@ -34,6 +34,8 @@ unsigned char *const rL = (unsigned char*)&rHL;
 #define COND_NC 0x2
 #define COND_C 0x3
 
+#define SETZEROFLAG(reg) setbit(rF, FLAG_Z, *(reg) == 0)            //sets the zero flag based on the contents of the given register (more DRY)
+
 unsigned char* regLookup[8] = //{rB, rC, rD, rE, rH, rL, rF, rA};     //rF should never actually be accessed; 110 should not be a valid register operand!
 {
     ((unsigned char*)&rBC) + 1,
@@ -74,13 +76,13 @@ inline int testCondition(int condtype)      // inputs cc bits: should be a numbe
 {
     switch (condtype)
     {
-        case 0:                             // NZ
+        case COND_NZ:
             return !getbit(*rF, FLAG_Z);
-        case 1:                             // Z
+        case COND_Z:
             return getbit(*rF, FLAG_Z);
-        case 2:                             // NC
+        case COND_NC:
             return !getbit(*rF, FLAG_C);
-        case 3:                             // C
+        case COND_C:
             return getbit(*rF, FLAG_C);
         default:
             printf("Error: invalid condition field 0x%x\n", condtype);
@@ -122,6 +124,22 @@ inline void step()
         result = result | (mem[++rPC] << 8);    /// take note: Little Endian!
         *dregLookup[(opcode >> 4) & 0x3] = result;
     }
+    else if ((opcode & 0xcb) == 0xc1)           // 1|1|d|d|0|p|0|1; p indicates push/pop.
+    {
+        if (opcode & 0x04)                      // push dd: 1|1|d|d|0|1|0|1
+        {
+            rSP -= 2;
+            uint16_t contents = *dregLookup[(opcode >> 4) & 0x3];
+            mem[rSP] = contents & 0xff;
+            mem[rSP + 1] = contents >> 8;       // little endian! low byte is stored first.
+        }
+        else                                    // pop dd:  1|1|d|d|0|0|0|1
+        {
+            uint16_t *reg = dregLookup[(opcode >> 4) & 0x03];
+            *reg = mem[rSP++];
+            *reg |= mem[rSP++] << 8;
+        }
+    }
 /// 8 bit arithmetic:
     else if ((opcode & 0xf8) == 0x80)
     {
@@ -129,7 +147,7 @@ inline void step()
             *rA += mem[rHL];
         else
             *rA += *regLookup[opcode & 0x07];   // add A, r: 1|0|0|0|0|r|r|r
-		setbit(rF, FLAG_Z, *rA == 0);
+		SETZEROFLAG(rA);
     }
     else if ((opcode & 0xf8) == 0x90)
     {
@@ -137,7 +155,7 @@ inline void step()
             *rA -= mem[rHL];
         else
             *rA -= *regLookup[opcode & 0x07];   // sub A, r: 1|0|0|0|1|r|r|r
-		setbit(rF, FLAG_Z, *rA == 0);
+		SETZEROFLAG(rA);
 	}
     else if ((opcode & 0xf8) == 0xa0)
     {
@@ -145,7 +163,7 @@ inline void step()
             *rA &= mem[rHL];
         else
             *rA &= *regLookup[opcode & 0x07];   // and A, r: 1|0|1|0|0|r|r|r
-		setbit(rF, FLAG_Z, *rA == 0);
+		SETZEROFLAG(rA);
  		setbits(rF, BIT_N | BIT_H | BIT_C, 0);
    }
     else if ((opcode & 0xf8) == 0xb0)
@@ -154,7 +172,7 @@ inline void step()
             *rA |= mem[rHL];
         else
             *rA |= *regLookup[opcode & 0x07];   // or A, r: 1|0|1|0|0|r|r|r
-		setbit(rF, FLAG_Z, *rA == 0);
+		SETZEROFLAG(rA);
 		setbits(rF, BIT_N | BIT_H | BIT_C, 0);
     }
     else if ((opcode & 0xf8) == 0xa8)
@@ -163,8 +181,34 @@ inline void step()
             *rA ^= mem[rHL];
         else
             *rA ^= *regLookup[opcode & 0x07];   // xor A, r: 1|0|1|0|0|r|r|r
-		setbit(rF, FLAG_Z, *rA == 0);
+		SETZEROFLAG(rA);
 		setbits(rF, BIT_N | BIT_H | BIT_C, 0);
+    }
+    else if ((opcode & 0xc7) == 0x04)           // inc r: 0|0|r|r|r|1|0|0
+    {
+        unsigned char *reg = (opcode & 0x38) == 0x30 ? &mem[rHL] : regLookup[(opcode >> 3) & 0x7];          // rrr == 110; inc (HL)
+        (*reg)++;
+        SETZEROFLAG(reg);
+    }
+    else if ((opcode & 0xc7) == 0x05)           // dec r: 0|0|r|r|r|1|0|1
+    {
+        unsigned char *reg = (opcode & 0x38) == 0x30 ? &mem[rHL] : regLookup[(opcode >> 3) & 0x7];          // rrr == 110; dec (HL)
+        (*reg)--;
+        SETZEROFLAG(reg);
+    }
+/// 16-bit arithmetic
+    else if ((opcode & 0xc7) == 0x03)           // 0|0|s|s|d|0|1|1 (d indicates decrement vs. increment)
+    {
+        uint16_t *reg = dregLookup[(opcode >> 4) & 0x03];
+        if (opcode & 0x08)                      // dec ss: 0|0|s|s|1|0|1|1
+        {
+            (*reg)--;
+        }
+        else                                    // inc ss: 0|0|s|s|0|0|1|1
+        {
+            (*reg)++;
+        }
+        SETZEROFLAG(reg);
     }
 /// absolute jumps
     else if ((opcode & 0xe7) == 0xc2 || opcode == 0xc3)             // JP [cc, ] nn: 1|1|0|c|c|0|1|C  n^16    (C indicates that the jump is non-conditional)
@@ -174,7 +218,7 @@ inline void step()
             uint16_t address = mem[++rPC];
             address |= mem[++rPC] << 8;
             rPC = address;
-            //rPC--;
+            rPC--;                              // <- because it gets decremented later; otherwise we'd need a branch, not much better :')
         }
         else
         {
@@ -199,21 +243,24 @@ inline void step()
 		if (testCondition((opcode >> 3) & 0x7))
 		{
 			rSP -= 2;
-			mem[rSP] = rPC;
 			uint16_t address = mem[++rPC];
+			mem[rSP] = rPC;
+			mem[rSP + 1] = rPC >> 8;            // we store rPC *after* reading the address - otherwise we jump back into the address bytes!
 			address |= mem[++rPC] << 8;
-			rPC = address;
+			printf("Calling procedure at address 0x%04x\n", address);
+			rPC = address - 1;                  // <- -1 because it gets incremented at the end of the cycle
 		}
 		else
 		{
 			rPC += 2;
 		}
 	}
-	else if ((opcode & 0xc7) == 0xc0)			// ret cc
+	else if ((opcode & 0xe7) == 0xc0)			// ret cc: 1|1|0|c|c|0|0|0   (note that there are only two condition bits: in Z80 there would be another preceding bit)
 	{											// equivalent: PC = (SP), SP = SP + 2
 		if (testCondition((opcode >> 3) & 0x7))
 		{
 			rPC = mem[rSP];
+			rPC |= mem[rSP + 1] << 8;           // high byte is second in memory
 			rSP += 2;
 		}
 	}
@@ -221,6 +268,28 @@ inline void step()
     {
         switch(opcode)
         {
+            case 0x07:                          // rlca - rotate accu left
+                *rA = ((*rA) << 1) | ((*rA) >> 7);
+                setbit(rF, FLAG_C, (*rA) & 0x01);
+                break;
+            case 0x17:                          // rla - rotate accu left through carry
+            {
+                char carrybit = getbit(*rF, FLAG_C);
+                setbit(rF, FLAG_C, (*rA) >> 7);
+                *rA = ((*rA) << 1) | carrybit;
+                break;
+            }
+            case 0x0f:                          // rrca - rotate accu right
+                setbit(rF, FLAG_C, (*rA) & 0x01);
+                *rA = ((*rA) >> 1) | ((*rA) << 7);
+                break;
+            case 0x1f:                          // rra - rotate accu right through carry
+            {
+                char carrybit = getbit(*rF, FLAG_C);
+                setbit(rF, FLAG_C, (*rA) & 0x01);
+                *rA = ((*rA) >> 1) | (carrybit << 7);
+                break;
+            }
             case 0x36:                          // ld A, nn
                 mem[rHL] = mem[++rPC];
                 break;
@@ -235,8 +304,14 @@ inline void step()
                 unsigned char partaddress = mem[++rPC];
                 *rA = mem[partaddress | (mem[++rPC] << 8)];
             }
+            case 0xe0:                          // ld (FF00 + nn), A     (write to io port nn)
+                mem[0xff00 + mem[++rPC]] = *rA;
+                break;
             case 0xe2:                          // ld (FF00 + C), A     (write to io port C)
                 mem[0xff00 + *rC] = *rA;
+                break;
+            case 0xf0:                          // ld A, (FF00 + nn)     (read from io port nn)
+                *rA = mem[0xff00 + mem[++rPC]];
                 break;
             case 0xf2:                          // ld A, (FF00 + C)     (read from io port C)
                 *rA = mem[0xff00 + *rC];
@@ -278,35 +353,80 @@ inline void step()
                     else                        // res b, r: 1|0|b|b|b|r|r|r
                         setbit(regLookup[opcode & 0x07], (opcode >> 3) & 0x07, 0);
                 }
+/// rotate-and-shift commands
+                else if((opcode & 0xf8) == 0x00)// rlc - rotate left: 0|0|0|0|0|r|r|r
+                {
+                    unsigned char *reg;
+                    if ((opcode & 0x07) == 0x06)
+                        reg = &mem[rHL];
+                    else
+                        reg = regLookup[opcode & 0x07];
+                    *reg = ((*reg) << 1) | ((*reg) >> 7);
+                    setbit(rF, FLAG_C, (*reg) & 0x01);
+                }
+                else if((opcode & 0xf8) == 0x10)// rl - rotate left through carry
+                {
+                    unsigned char *reg;
+                    if ((opcode & 0x07) == 0x06)
+                        reg = &mem[rHL];
+                    else
+                        reg = regLookup[opcode & 0x07];
+                    char carrybit = getbit(*rF, FLAG_C);
+                    setbit(rF, FLAG_C, (*reg) >> 7);
+                    *reg = ((*reg) << 1) | carrybit;
+                }
+                else if((opcode & 0xf8) == 0x08)// rrc - rotate right
+                {
+                    unsigned char *reg;
+                    if ((opcode & 0x07) == 0x06)
+                        reg = &mem[rHL];
+                    else
+                        reg = regLookup[opcode & 0x07];
+                    setbit(rF, FLAG_C, (*reg) & 0x08);
+                    *reg = ((*reg) >> 1) | ((*reg) << 7);
+                }
+                else if((opcode & 0xf8) == 0x0)// rr - rotate right through carry
+                {
+                    unsigned char *reg;
+                    if ((opcode & 0x07) == 0x06)
+                        reg = &mem[rHL];
+                    else
+                        reg = regLookup[opcode & 0x07];
+                    char carrybit = getbit(*rF, FLAG_C);
+                    setbit(rF, FLAG_C, (*reg) & 0x18);
+                    *reg = ((*reg) >> 1) | (carrybit << 7);
+                }
+                else
+                {
+                    printf("Unrecognized CB-prefixed instruction: 0x%02x (Memory location: 0x%04x)\n", opcode, rPC);
+                    error = 1;
+                }
 				break;
 /// jumps
             case 0xc3:      // jp nn: 0xc3, n^16
             {
                 uint16_t address = mem[++rPC];
                 address |= mem[++rPC] << 8;
-                rPC = address;
+                rPC = address - 1;
                 break;
             }
             case 0xe9:      // jp HL
-                rPC = rHL;
+                rPC = rHL - 1;
 				break;
-			case 0x18:
+			case 0x18:      // jr nn
 				rPC += *((signed char*) &mem[++rPC]);
 				break;
-			/*case 0x38:
-				if (testCondition(COND_C))
-				{
-					rPC += *((signed char*) &mem[++rPC]);
-				}*/
 			case 0xcd:		// call nn   (n^16)
 				rSP -= 2;
-				mem[rSP] = rPC;
 				uint16_t address = mem[++rPC];
 				address |= mem[++rPC] << 8;
-				rPC = address;
+				mem[rSP] = rPC;
+				mem[rSP + 1] = rPC >> 8;
+                rPC = address - 1;                  // <- -1 because it gets incremented at the end of the cycle
 				break;
 			case 0xc9:		// ret: 1|1|0|0|1|0|0|1
 				rPC = mem[rSP];
+				rPC |= mem[rSP + 1] << 8;           // high byte comes second.
 				rSP += 2;
 				break;
 /// CPU control
