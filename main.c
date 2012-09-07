@@ -196,6 +196,21 @@ inline void step()
         (*reg)--;
         SETZEROFLAG(reg);
     }
+    else if ((opcode & 0xf8) == 0xb8 || opcode == 0xfe)
+    {
+        unsigned char val;
+        if (opcode == 0xfe)                     // cp n
+        {
+            val = mem[++rPC];
+        }
+        else                                    // cp r: 1|0|1|1|1|r|r|r        (r == 110 => (HL))
+        {
+            val = (opcode & 0x07) == 0x06 ? mem[rHL] : *regLookup[opcode & 0x07];
+        }
+        setbit(rF, FLAG_Z, *rA == val);
+        setbit(rF, FLAG_C, *rA < val);
+        setbit(rF, FLAG_N, 1);
+    }
 /// 16-bit arithmetic
     else if ((opcode & 0xc7) == 0x03)           // 0|0|s|s|d|0|1|1 (d indicates decrement vs. increment)
     {
@@ -303,6 +318,19 @@ inline void step()
             {
                 unsigned char partaddress = mem[++rPC];
                 *rA = mem[partaddress | (mem[++rPC] << 8)];
+                break;
+            }
+            case 0x02:                          // ld (BC), A
+                mem[rBC] = *rA;
+                break;
+            case 0x12:                          // ld (DE), A
+                mem[rDE] = *rA;
+                break;
+            case 0xea:                          // ld (nn), A
+            {
+                unsigned char partaddress = mem[++rPC];
+                mem[partaddress | mem[++rPC] << 8] = *rA;
+                break;
             }
             case 0xe0:                          // ld (FF00 + nn), A     (write to io port nn)
                 mem[0xff00 + mem[++rPC]] = *rA;
